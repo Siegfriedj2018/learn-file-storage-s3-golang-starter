@@ -1,28 +1,23 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net/http"
 	"os"
-	"os/exec"
+	"path"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
-	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/calculateAspect"
 )
 
 func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, (1 <<30))
+	r.Body = http.MaxBytesReader(w, r.Body, (1 << 30))
 	videoIDString := r.PathValue("videoID")
 	videoID, err := uuid.Parse(videoIDString)
 	if err != nil {
@@ -41,7 +36,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusUnauthorized, "Invalid JWT", err)
 		return
 	}
-	
+
 	log.Println("uploading video for", videoID, "by user", userID)
 
 	videoData, err := cfg.db.GetVideo(videoID)
@@ -61,7 +56,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer file.Close()
-	
+
 	mediaData, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Invalid Content-Type", err)
@@ -81,32 +76,42 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	defer videoTemp.Close()
 
 	_, err = io.Copy(videoTemp, file)
-	
+
 	_, err = videoTemp.Seek(0, io.SeekStart)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "failed to rest video", err)
 		return
 	}
 
-	randomBytes := make([]byte, 32)
-	_, err = rand.Read(randomBytes)
+	aspectRatio, err := getvideoAspectRatio(videoTemp.Name())
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "failed to generate rand key", err)
+		respondWithError(w, http.StatusInternalServerError, "failed to get aspect ratio", err)
 		return
 	}
-	hexFileKey := hex.EncodeToString(randomBytes)
-	finalFileKey := hexFileKey + ".mp4"
+
+	var keyPrefix string
+	switch aspectRatio {
+	case "16:9":
+		keyPrefix = "landscape"
+	case "9:16":
+		keyPrefix = "portrait"
+	default:
+		keyPrefix = "other"
+	}
+
+	key := getAssetPath(mediaData)
+	key = path.Join(keyPrefix, key)
 
 	params := &s3.PutObjectInput{
-		Bucket: aws.String(cfg.s3Bucket),
-		Key: 		aws.String(finalFileKey),
-		Body: 	videoTemp,
+		Bucket:      aws.String(cfg.s3Bucket),
+		Key:         aws.String(key),
+		Body:        videoTemp,
 		ContentType: aws.String(mediaData),
 	}
 
 	_, err = cfg.s3Client.PutObject(context.TODO(), params)
 
-	videoUrl := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, finalFileKey)
+	videoUrl := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, key)
 	videoData.VideoURL = &videoUrl
 	err = cfg.db.UpdateVideo(videoData)
 	if err != nil {
@@ -115,24 +120,4 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 
 	respondWithJSON(w, http.StatusOK, videoData)
-}
-
-func getvideoAspectRatio(filepath string) (string, error) {
-	type videoAspect struct {
-		Width		string 	`json:"width"`
-		Height 	string	`json:"height"`
-	}
-	videoCmd := exec.Command("ffprobe", "-v error", "-print_format json", "-show_stream ./samples/boots-video-vertical.mp4")
-	var bytesBuff bytes.Buffer
-	videoCmd.Stdout = &bytesBuff
-	videoCmd.Run()
-
-
-	var videoAsp *videoAspect
-	err := json.Unmarshal(bytesBuff.Bytes(), &videoAsp)
-	if err != nil {
-		return "", fmt.Errorf("Error unmarshalling, %v", err)
-	}
-
-	calculatedAspect := IndentifyAspectRatio(videoAsp.Width, videoAsp.Height)
 }
