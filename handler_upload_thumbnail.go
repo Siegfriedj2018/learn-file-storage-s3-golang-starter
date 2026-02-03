@@ -35,7 +35,11 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 
 	// Parse the form data
 	const maxMemory = 10 << 20
-	r.ParseMultipartForm(maxMemory)
+	err = r.ParseMultipartForm(maxMemory)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Error parsing", err)
+		return
+	}
 
 	// Getting image data
 	file, header, err := r.FormFile("thumbnail")
